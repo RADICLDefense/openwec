@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Subscription filters can no longer be created nor edited using the cli (#186)
 
+## [v0.3.1-radicl.1]
+
+### Changed
+
+- First RADICLDefense fork release.
+- Fix Alpine Docker builds by using the official Rust Alpine builder and disabling musl `crt-static` in the build stage.
+
 ## [v0.3.0]
 
 ### Added

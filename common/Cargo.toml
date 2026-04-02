@@ -1,6 +1,6 @@
 [package]
 name = "common"
-version = "0.3.1-radicl.1"
+version = "0.3.1-radicl.3"
 edition = "2021"
 # Used by cargo-deb
 homepage = "https://github.com/cea-sec/openwec"

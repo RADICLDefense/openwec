@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Subscription filters can no longer be created nor edited using the cli (#186)
 
-## [v0.3.1-radicl.1]
+## [v0.3.1-radicl.3]
 
 ### Changed
 

@@ -1,5 +1,6 @@
-FROM alpine:3.21 AS chef
-RUN apk add --no-cache rust cargo && cargo install --locked cargo-chef
+FROM rust:alpine3.21 AS chef
+ENV RUSTFLAGS="-C target-feature=-crt-static"
+RUN cargo install --locked cargo-chef
 WORKDIR /SRC
 
 FROM chef AS planner

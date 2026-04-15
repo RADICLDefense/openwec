@@ -11,6 +11,7 @@ pub const DEFAULT_CONFIG_FILE: &str = "/etc/openwec.conf.toml";
 pub enum Authentication {
     Kerberos(Kerberos),
     Tls(Tls),
+    TrustedProxyTls(TrustedProxyTls),
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -39,6 +40,67 @@ impl Tls {
 
     pub fn ca_certificate(&self) -> &str {
         self.ca_certificate.as_ref()
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct TrustedProxyTls {
+    ca_certificate: String,
+    client_certificate_header: Option<String>,
+    client_certificate_subject_header: Option<String>,
+    client_certificate_issuer_header: Option<String>,
+    client_certificate_serial_header: Option<String>,
+    client_certificate_validity_header: Option<String>,
+    x_forwarded_for_header: Option<String>,
+}
+
+impl TrustedProxyTls {
+    const DEFAULT_CLIENT_CERTIFICATE_HEADER: &str = "x-amzn-mtls-clientcert-leaf";
+    const DEFAULT_CLIENT_CERTIFICATE_SUBJECT_HEADER: &str = "x-amzn-mtls-clientcert-subject";
+    const DEFAULT_CLIENT_CERTIFICATE_ISSUER_HEADER: &str = "x-amzn-mtls-clientcert-issuer";
+    const DEFAULT_CLIENT_CERTIFICATE_SERIAL_HEADER: &str = "x-amzn-mtls-clientcert-serial-number";
+    const DEFAULT_CLIENT_CERTIFICATE_VALIDITY_HEADER: &str = "x-amzn-mtls-clientcert-validity";
+    const DEFAULT_X_FORWARDED_FOR_HEADER: &str = "x-forwarded-for";
+
+    pub fn ca_certificate(&self) -> &str {
+        self.ca_certificate.as_ref()
+    }
+
+    pub fn client_certificate_header(&self) -> &str {
+        self.client_certificate_header
+            .as_deref()
+            .unwrap_or(Self::DEFAULT_CLIENT_CERTIFICATE_HEADER)
+    }
+
+    pub fn client_certificate_subject_header(&self) -> &str {
+        self.client_certificate_subject_header
+            .as_deref()
+            .unwrap_or(Self::DEFAULT_CLIENT_CERTIFICATE_SUBJECT_HEADER)
+    }
+
+    pub fn client_certificate_issuer_header(&self) -> &str {
+        self.client_certificate_issuer_header
+            .as_deref()
+            .unwrap_or(Self::DEFAULT_CLIENT_CERTIFICATE_ISSUER_HEADER)
+    }
+
+    pub fn client_certificate_serial_header(&self) -> &str {
+        self.client_certificate_serial_header
+            .as_deref()
+            .unwrap_or(Self::DEFAULT_CLIENT_CERTIFICATE_SERIAL_HEADER)
+    }
+
+    pub fn client_certificate_validity_header(&self) -> &str {
+        self.client_certificate_validity_header
+            .as_deref()
+            .unwrap_or(Self::DEFAULT_CLIENT_CERTIFICATE_VALIDITY_HEADER)
+    }
+
+    pub fn x_forwarded_for_header(&self) -> &str {
+        self.x_forwarded_for_header
+            .as_deref()
+            .unwrap_or(Self::DEFAULT_X_FORWARDED_FOR_HEADER)
     }
 }
 
@@ -782,6 +844,121 @@ mod tests {
         let mut map = HashMap::new();
         map.insert("bootstrap.servers".to_owned(), "localhost:9092".to_owned());
         assert_eq!(s.outputs().kafka().options(), &map);
+    }
+
+    const CONFIG_TRUSTED_PROXY_TLS: &str = r#"
+        [database]
+        type =  "SQLite"
+        path = "/tmp/toto.sqlite"
+
+        [[collectors]]
+        hostname = "wec.windomain.local"
+        listen_address = "0.0.0.0"
+        listen_port = 5986
+
+        [collectors.authentication]
+        type = "TrustedProxyTls"
+        ca_certificate = "/etc/ca_certificate.pem"
+        client_certificate_header = "x-amzn-mtls-clientcert-leaf"
+        client_certificate_subject_header = "x-amzn-mtls-clientcert-subject"
+        client_certificate_issuer_header = "x-amzn-mtls-clientcert-issuer"
+        client_certificate_serial_header = "x-amzn-mtls-clientcert-serial-number"
+        client_certificate_validity_header = "x-amzn-mtls-clientcert-validity"
+    "#;
+
+    #[test]
+    fn test_settings_trusted_proxy_tls() {
+        let s = Settings::from_str(CONFIG_TRUSTED_PROXY_TLS).unwrap();
+        assert_eq!(s.collectors().len(), 1);
+        let collector = &s.collectors()[0];
+        assert_eq!(collector.hostname().unwrap(), "wec.windomain.local");
+        assert_eq!(collector.listen_address(), "0.0.0.0");
+        assert_eq!(collector.listen_port(), 5986);
+        assert_eq!(collector.max_content_length(), 512_000);
+        assert_eq!(collector.enable_proxy_protocol(), false);
+        assert_eq!(collector.advertized_port(), 5986);
+
+        let trusted_proxy_tls = match collector.authentication() {
+            Authentication::TrustedProxyTls(trusted_proxy_tls) => trusted_proxy_tls,
+            _ => panic!("Wrong authentication type"),
+        };
+        assert_eq!(
+            trusted_proxy_tls.ca_certificate(),
+            "/etc/ca_certificate.pem"
+        );
+        assert_eq!(
+            trusted_proxy_tls.client_certificate_header(),
+            "x-amzn-mtls-clientcert-leaf"
+        );
+        assert_eq!(
+            trusted_proxy_tls.client_certificate_subject_header(),
+            "x-amzn-mtls-clientcert-subject"
+        );
+        assert_eq!(
+            trusted_proxy_tls.client_certificate_issuer_header(),
+            "x-amzn-mtls-clientcert-issuer"
+        );
+        assert_eq!(
+            trusted_proxy_tls.client_certificate_serial_header(),
+            "x-amzn-mtls-clientcert-serial-number"
+        );
+        assert_eq!(
+            trusted_proxy_tls.client_certificate_validity_header(),
+            "x-amzn-mtls-clientcert-validity"
+        );
+        assert_eq!(
+            trusted_proxy_tls.x_forwarded_for_header(),
+            "x-forwarded-for"
+        );
+    }
+
+    const CONFIG_TRUSTED_PROXY_TLS_DEFAULT_HEADERS: &str = r#"
+        [database]
+        type =  "SQLite"
+        path = "/tmp/toto.sqlite"
+
+        [[collectors]]
+        listen_address = "0.0.0.0"
+
+        [collectors.authentication]
+        type = "TrustedProxyTls"
+        ca_certificate = "/etc/ca_certificate.pem"
+    "#;
+
+    #[test]
+    fn test_settings_trusted_proxy_tls_defaults() {
+        let s = Settings::from_str(CONFIG_TRUSTED_PROXY_TLS_DEFAULT_HEADERS).unwrap();
+        let collector = &s.collectors()[0];
+
+        let trusted_proxy_tls = match collector.authentication() {
+            Authentication::TrustedProxyTls(trusted_proxy_tls) => trusted_proxy_tls,
+            _ => panic!("Wrong authentication type"),
+        };
+
+        assert_eq!(
+            trusted_proxy_tls.client_certificate_header(),
+            "x-amzn-mtls-clientcert-leaf"
+        );
+        assert_eq!(
+            trusted_proxy_tls.client_certificate_subject_header(),
+            "x-amzn-mtls-clientcert-subject"
+        );
+        assert_eq!(
+            trusted_proxy_tls.client_certificate_issuer_header(),
+            "x-amzn-mtls-clientcert-issuer"
+        );
+        assert_eq!(
+            trusted_proxy_tls.client_certificate_serial_header(),
+            "x-amzn-mtls-clientcert-serial-number"
+        );
+        assert_eq!(
+            trusted_proxy_tls.client_certificate_validity_header(),
+            "x-amzn-mtls-clientcert-validity"
+        );
+        assert_eq!(
+            trusted_proxy_tls.x_forwarded_for_header(),
+            "x-forwarded-for"
+        );
     }
 
     const GETTING_STARTED: &str = r#"

@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add an optional Prometheus endpoint that exposes metrics (#190)
 - Optionally wrap TCP stream in a TLS session in TCP driver (#203)
 - Support for SPNEGO authentication (#307)
+- Add `TrustedProxyTls` collector authentication mode for trusted proxy / load balancer mTLS termination.
 
 ## Changed
 
@@ -20,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In formats `Json`, `Nxlog` and `RawJson`, `OpenWEC.Principal` is replaced by `OpenWEC.Client` (#186)
 - In `Files` driver, `{principal}` is replaced by `{client}` in `path` config (#186)
 - In access log pattern, `{X(principal)}` is replaced by `{X(client)}` (#186)
+- In `TrustedProxyTls` mode, the effective forwarded client IP is taken from the rightmost `X-Forwarded-For` hop and the proxy-mode documentation now describes trusted-network and CA-bundle requirements.
 
 ## Removed
 

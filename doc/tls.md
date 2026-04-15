@@ -109,7 +109,14 @@ If the client works on an older version of Windows, make sure to activate TLS 1.
 
 For troubleshooting, Windows Events from `Eventlog-ForwardingPlugin` (Operational) and `Windows Remote Management` (Analytics, needs to be enabled in the View drop-down) can be of great help.
 
-## Server configuration
+## Server configuration
+
+OpenWEC now supports two TLS-based collector modes:
+
+- `Tls`: OpenWEC terminates TLS itself and requires a server certificate and private key.
+- `TrustedProxyTls`: a trusted reverse proxy or load balancer terminates HTTPS and mTLS, then forwards the verified client certificate details to OpenWEC over HTTP.
+
+### End-to-end TLS mode
 
 To configure OpenWEC on a machine named `wec.winserver.local`, the minimal options to configure in `/etc/openwec.conf.toml` are as follows:
 
@@ -124,3 +131,47 @@ ca_certificate = "/etc/ca-cert.pem"
 server_certificate = "/etc/server-cert.pem"
 server_private_key = "/etc/server-key.pem"
 ```
+
+### Trusted proxy TLS mode
+
+Use `TrustedProxyTls` when HTTPS and mTLS are terminated by a trusted proxy in front of OpenWEC, such as an AWS Application Load Balancer configured for mTLS verification mode.
+
+In this mode:
+
+- OpenWEC does **not** require `server_certificate` or `server_private_key`.
+- OpenWEC still requires the client CA bundle so that it can validate the forwarded client certificate.
+- OpenWEC authenticates clients from the forwarded leaf certificate header and derives the client identity from that certificate.
+- If optional forwarded subject or issuer headers are present, OpenWEC checks them for CN consistency against the forwarded certificate. Optional serial and validity headers are checked against the exact certificate values.
+- If the forwarded client IP header is missing, OpenWEC falls back to the backend socket address.
+- If the forwarded client IP header contains multiple comma-separated hops, OpenWEC uses the rightmost non-empty value as the effective client IP, which matches AWS ALB append behavior.
+
+Operational notes:
+
+- The OpenWEC backend listener should only be reachable from the trusted proxy or load balancer. In `TrustedProxyTls` mode, forwarded authentication headers are only trustworthy when that network boundary is enforced.
+- The `ca_certificate` bundle may need to include the issuing chain material required to validate the forwarded leaf certificate. In simple direct-root deployments a root CA may be enough, but intermediate-based PKI deployments can require the relevant intermediates to be present in the configured bundle.
+
+Minimal example:
+
+```toml
+# /etc/openwec.conf.toml
+[[collectors]]
+hostname = "wec.winserver.local"
+listen_address = "0.0.0.0"
+
+[collectors.authentication]
+type = "TrustedProxyTls"
+ca_certificate = "/etc/ca-cert.pem"
+```
+
+Default proxy header names are:
+
+- `client_certificate_header`: `x-amzn-mtls-clientcert-leaf`
+- `client_certificate_subject_header`: `x-amzn-mtls-clientcert-subject`
+- `client_certificate_issuer_header`: `x-amzn-mtls-clientcert-issuer`
+- `client_certificate_serial_header`: `x-amzn-mtls-clientcert-serial-number`
+- `client_certificate_validity_header`: `x-amzn-mtls-clientcert-validity`
+- `x_forwarded_for_header`: `x-forwarded-for`
+
+Only the forwarded leaf certificate header is required at runtime. The subject and issuer headers are optional CN consistency checks, while the serial and validity headers are optional exact consistency checks. If the forwarded IP header is present, OpenWEC uses it as the client IP for event metadata and output path mapping; when that header contains multiple comma-separated hops, OpenWEC uses the rightmost non-empty value. Otherwise it falls back to the proxy-to-backend socket address. The `ca_certificate` bundle should contain whatever issuer certificates are needed for OpenWEC to validate the forwarded leaf certificate in your PKI.
+
+See [openwec.conf.sample.toml](../openwec.conf.sample.toml) for the full list of available parameters and header overrides.

@@ -229,7 +229,7 @@
 # Authentication settings for this collector
 [collectors.authentication]
 # [Required]
-# Authentication method: Kerberos, Tls
+# Authentication method: Kerberos, Tls, TrustedProxyTls
 # type = "Kerberos"
 
 ## Kerberos configuration
@@ -258,6 +258,63 @@
 # server_private_key = "/etc/server-key.pem"
 
 ## End of TLS configuration
+
+## Trusted proxy TLS configuration
+## Use this mode when a trusted HTTPS proxy or load balancer terminates mTLS
+## and forwards the verified client certificate metadata to openwec over HTTP.
+## openwec requires the forwarded leaf certificate header, validates it against
+## the configured client CA bundle, and derives identity details from the cert.
+## If the optional subject or issuer headers below are present, openwec checks
+## them for CN consistency against the forwarded certificate. Optional serial
+## and validity headers are checked against the exact certificate values. If the
+## optional client IP header is missing, openwec falls back to the backend
+## socket address. If that header contains multiple comma-separated hops,
+## openwec uses the rightmost non-empty value as the effective client IP.
+## Only the trusted proxy or load balancer should be able to reach this
+## listener. The configured CA bundle may need to include intermediate issuer
+## certificates as well as roots, depending on how your client PKI is built.
+
+# [Required]
+# CA certificate used to sign client certificates
+# ca_certificate = "/etc/ca-cert.pem"
+
+# [Optional]
+# URL-encoded PEM leaf certificate header set by the trusted proxy
+# Default: x-amzn-mtls-clientcert-leaf
+# client_certificate_header = "x-amzn-mtls-clientcert-leaf"
+
+# [Optional]
+# Client certificate subject header set by the trusted proxy.
+# If present, its CN component must match the forwarded certificate.
+# Default: x-amzn-mtls-clientcert-subject
+# client_certificate_subject_header = "x-amzn-mtls-clientcert-subject"
+
+# [Optional]
+# Client certificate issuer header set by the trusted proxy.
+# If present, its CN component must match the forwarded certificate.
+# Default: x-amzn-mtls-clientcert-issuer
+# client_certificate_issuer_header = "x-amzn-mtls-clientcert-issuer"
+
+# [Optional]
+# Client certificate serial number header set by the trusted proxy.
+# If present, it must match the forwarded certificate.
+# Default: x-amzn-mtls-clientcert-serial-number
+# client_certificate_serial_header = "x-amzn-mtls-clientcert-serial-number"
+
+# [Optional]
+# Client certificate validity header set by the trusted proxy.
+# If present, it must match the forwarded certificate.
+# Default: x-amzn-mtls-clientcert-validity
+# client_certificate_validity_header = "x-amzn-mtls-clientcert-validity"
+
+# [Optional]
+# Header used to preserve the originating client IP address.
+# If missing, openwec falls back to the backend socket address.
+# If multiple comma-separated hops are present, the rightmost non-empty value is used.
+# Default: x-forwarded-for
+# x_forwarded_for_header = "x-forwarded-for"
+
+## End of trusted proxy TLS configuration
 
 ##########################
 ##     Cli settings     ##

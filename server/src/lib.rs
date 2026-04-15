@@ -16,11 +16,12 @@ mod sldc;
 mod soap;
 mod subscription;
 mod tls;
+mod trusted_proxy;
 
 use anyhow::{anyhow, bail, Context, Result};
 use common::database::{db_from_settings, schema_is_up_to_date, Db};
 use common::encoding::decode_utf16le;
-use common::settings::{Authentication, Kerberos, Monitoring, Tls};
+use common::settings::{Authentication, Kerberos, Monitoring, Tls, TrustedProxyTls};
 use common::settings::{Collector, Server as ServerSettings, Settings};
 use core::pin::Pin;
 use futures::Future;
@@ -71,6 +72,10 @@ use tokio_util::sync::CancellationToken;
 use crate::logging::ACCESS_LOGGER;
 use crate::proxy_protocol::read_proxy_header;
 use crate::tls::{find_matching_ca, issuer_from_cert, make_config, subject_from_cert};
+use crate::trusted_proxy::{
+    authenticate_request as authenticate_trusted_proxy_request,
+    make_config as make_trusted_proxy_config, TrustedProxyConfig,
+};
 
 pub enum RequestCategory {
     Enumerate(String),
@@ -141,6 +146,7 @@ impl RequestData {
 pub enum AuthenticationContext {
     Kerberos(Arc<Mutex<kerberos::State>>),
     Tls(String, String),
+    TrustedProxy(Arc<TrustedProxyConfig>),
 }
 
 fn empty() -> BoxBody<Bytes, Infallible> {
@@ -209,6 +215,9 @@ async fn get_request_payload(
         AuthenticationContext::Kerberos(conn_state) => {
             kerberos::get_request_payload(conn_state.to_owned(), parts, data).await?
         }
+        AuthenticationContext::TrustedProxy(_) => {
+            bail!("Trusted proxy configuration must be resolved before payload handling")
+        }
     };
 
     match message {
@@ -273,6 +282,9 @@ async fn create_response(
             };
             Ok(response.body(body)?)
         }
+        AuthenticationContext::TrustedProxy(_) => {
+            bail!("Trusted proxy configuration must be resolved before response handling")
+        }
     }
 }
 
@@ -293,11 +305,21 @@ fn log_auth_error(addr: &SocketAddr, req: &Request<Incoming>, err_str: String, d
     }
 }
 
+fn effective_addr_from_forwarded_client_ip(
+    forwarded_client_ip: Option<IpAddr>,
+    backend_addr: &SocketAddr,
+) -> SocketAddr {
+    SocketAddr::new(
+        forwarded_client_ip.unwrap_or(backend_addr.ip()),
+        backend_addr.port(),
+    )
+}
+
 async fn authenticate(
     auth_ctx: &AuthenticationContext,
     req: &Request<Incoming>,
     addr: &SocketAddr,
-) -> Result<(String, Builder)> {
+) -> Result<(String, AuthenticationContext, SocketAddr, Builder)> {
     match auth_ctx {
         AuthenticationContext::Tls(subject, _) => {
             // if subject is empty, show unauthorized error
@@ -307,7 +329,7 @@ async fn authenticate(
             }
 
             let response = Response::builder();
-            Ok((subject.to_owned(), response))
+            Ok((subject.to_owned(), auth_ctx.clone(), *addr, response))
         }
         AuthenticationContext::Kerberos(conn_state) => {
             let auth_result = kerberos::authenticate(conn_state, req)
@@ -337,7 +359,25 @@ async fn authenticate(
                 };
                 response = response.header(WWW_AUTHENTICATE, format!("{} {}", auth_method, token))
             }
-            Ok((auth_result.principal().to_owned(), response))
+            Ok((
+                auth_result.principal().to_owned(),
+                auth_ctx.clone(),
+                *addr,
+                response,
+            ))
+        }
+        AuthenticationContext::TrustedProxy(config) => {
+            let auth_result = authenticate_trusted_proxy_request(config, req).map_err(|err| {
+                log_auth_error(addr, req, format!("{:?}", err), true);
+                err
+            })?;
+
+            Ok((
+                auth_result.subject.clone(),
+                AuthenticationContext::Tls(auth_result.subject, auth_result.thumbprint),
+                effective_addr_from_forwarded_client_ip(auth_result.client_ip, addr),
+                Response::builder(),
+            ))
         }
     }
 }
@@ -500,41 +540,44 @@ async fn handle(
     let uri = req.uri().to_string();
 
     // Check authentication
-    let (client, mut response_builder) = match authenticate(&auth_ctx, &req, &addr).await {
-        Ok((client, builder)) => (client, builder),
-        Err(_) => {
-            let status = StatusCode::UNAUTHORIZED;
-            log_response(
-                &addr,
-                &method,
-                &uri,
-                &start,
-                status,
-                "-",
-                ConnectionStatus::Alive,
-            );
-            if let AuthenticationContext::Kerberos(_ctx) = auth_ctx {
-                return Ok(Response::builder()
-                    .status(status)
-                    .header(WWW_AUTHENTICATE, "Kerberos")
-                    .header(WWW_AUTHENTICATE, "Negotiate")
-                    .body(empty())
-                    .expect("Failed to build HTTP response"));
-            } else {
-                return Ok(build_error_response(status));
+    let (client, request_auth_ctx, effective_addr, mut response_builder) =
+        match authenticate(&auth_ctx, &req, &addr).await {
+            Ok((client, request_auth_ctx, effective_addr, builder)) => {
+                (client, request_auth_ctx, effective_addr, builder)
             }
-        }
-    };
+            Err(_) => {
+                let status = StatusCode::UNAUTHORIZED;
+                log_response(
+                    &addr,
+                    &method,
+                    &uri,
+                    &start,
+                    status,
+                    "-",
+                    ConnectionStatus::Alive,
+                );
+                if let AuthenticationContext::Kerberos(_ctx) = auth_ctx {
+                    return Ok(Response::builder()
+                        .status(status)
+                        .header(WWW_AUTHENTICATE, "Kerberos")
+                        .header(WWW_AUTHENTICATE, "Negotiate")
+                        .body(empty())
+                        .expect("Failed to build HTTP response"));
+                } else {
+                    return Ok(build_error_response(status));
+                }
+            }
+        };
 
     debug!("Successfully authenticated {}", client);
 
-    let request_data = match RequestData::new(&client, &addr, &req) {
+    let request_data = match RequestData::new(&client, &effective_addr, &req) {
         Ok(request_data) => request_data,
         Err(e) => {
             error!("Failed to compute request data: {:?}", e);
             let status = StatusCode::NOT_FOUND;
             log_response(
-                &addr,
+                &effective_addr,
                 &method,
                 &uri,
                 &start,
@@ -547,24 +590,31 @@ async fn handle(
     };
 
     // Get request payload
-    let request_payload =
-        match get_request_payload(&collector, &monitoring, &auth_ctx, &request_data, req).await {
-            Ok(payload) => payload,
-            Err(e) => {
-                error!("Failed to retrieve request payload: {:?}", e);
-                let status = StatusCode::BAD_REQUEST;
-                log_response(
-                    &addr,
-                    &method,
-                    &uri,
-                    &start,
-                    status,
-                    &client,
-                    ConnectionStatus::Alive,
-                );
-                return Ok(build_error_response(status));
-            }
-        };
+    let request_payload = match get_request_payload(
+        &collector,
+        &monitoring,
+        &request_auth_ctx,
+        &request_data,
+        req,
+    )
+    .await
+    {
+        Ok(payload) => payload,
+        Err(e) => {
+            error!("Failed to retrieve request payload: {:?}", e);
+            let status = StatusCode::BAD_REQUEST;
+            log_response(
+                &effective_addr,
+                &method,
+                &uri,
+                &start,
+                status,
+                &client,
+                ConnectionStatus::Alive,
+            );
+            return Ok(build_error_response(status));
+        }
+    };
 
     trace!(
         "Received payload: {:?}",
@@ -586,7 +636,7 @@ async fn handle(
     let (tx, rx) = oneshot::channel();
 
     // The following variables need to be cloned because they are moved in the spawned closure
-    let auth_ctx_cloned = auth_ctx.clone();
+    let auth_ctx_cloned = request_auth_ctx.clone();
     let method_cloned = method.clone();
     let uri_cloned = uri.clone();
     let client_cloned = client.clone();
@@ -643,7 +693,7 @@ async fn handle(
             // Ok(Err(_)): the handle_payload task returned an Err
             let status = StatusCode::INTERNAL_SERVER_ERROR;
             log_response(
-                &addr,
+                &effective_addr,
                 &method,
                 &uri,
                 &start,
@@ -658,7 +708,7 @@ async fn handle(
             error!("handle_payload task sender has been dropped. Maybe the task panicked?");
             let status = StatusCode::INTERNAL_SERVER_ERROR;
             log_response(
-                &addr,
+                &effective_addr,
                 &method,
                 &uri,
                 &start,
@@ -678,26 +728,27 @@ async fn handle(
 
     response_builder = response_builder.status(status);
     // Create HTTP response
-    let response = match create_response(&auth_ctx, response_builder, response_payload).await {
-        Ok(response) => response,
-        Err(e) => {
-            error!("Failed to build HTTP response: {:?}", e);
-            let status = StatusCode::INTERNAL_SERVER_ERROR;
-            log_response(
-                &addr,
-                &method,
-                &uri,
-                &start,
-                status,
-                &client,
-                ConnectionStatus::Alive,
-            );
-            return Ok(build_error_response(status));
-        }
-    };
+    let response =
+        match create_response(&request_auth_ctx, response_builder, response_payload).await {
+            Ok(response) => response,
+            Err(e) => {
+                error!("Failed to build HTTP response: {:?}", e);
+                let status = StatusCode::INTERNAL_SERVER_ERROR;
+                log_response(
+                    &effective_addr,
+                    &method,
+                    &uri,
+                    &start,
+                    status,
+                    &client,
+                    ConnectionStatus::Alive,
+                );
+                return Ok(build_error_response(status));
+            }
+        };
 
     log_response(
-        &addr,
+        &effective_addr,
         &method,
         &uri,
         &start,
@@ -1092,6 +1143,125 @@ fn create_tls_server(
     Box::pin(server)
 }
 
+fn create_trusted_proxy_server(
+    trusted_proxy_settings: &TrustedProxyTls,
+    collector_settings: Collector,
+    collector_db: Db,
+    collector_subscriptions: Subscriptions,
+    collector_heartbeat_tx: mpsc::Sender<WriteHeartbeatMessage>,
+    collector_server_settings: ServerSettings,
+    monitoring_settings: Option<Monitoring>,
+    collector_shutdown_ct: CancellationToken,
+    server_addr: SocketAddr,
+) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
+    let trusted_proxy_config = Arc::new(
+        make_trusted_proxy_config(trusted_proxy_settings)
+            .expect("Error while configuring trusted proxy authentication"),
+    );
+
+    let server = async move {
+        let listener = TcpListener::bind(server_addr).await?;
+        info!("Server listenning on {}", server_addr);
+
+        let (close_tx, close_rx) = watch::channel(());
+        loop {
+            let shutdown_ct = collector_shutdown_ct.clone();
+
+            let (mut stream, client_addr) = tokio::select! {
+                conn = listener.accept() => match conn {
+                    Ok(conn) => conn,
+                    Err(err) => {
+                        warn!("Could not get client: {:?}", err);
+                        continue;
+                    }
+                },
+                _ = shutdown_ct.cancelled() => {
+                    debug!("Shutdown signal received, stop accepting new clients connections");
+                    break;
+                }
+            };
+
+            debug!("Received TCP connection from {}", client_addr);
+
+            let keep_alive = create_keepalive_settings(&collector_server_settings);
+            let socket_ref = SockRef::from(&stream);
+            socket_ref.set_tcp_keepalive(&keep_alive)?;
+
+            let collector_settings = collector_settings.clone();
+            let svc_db = collector_db.clone();
+            let svc_server_settings = collector_server_settings.clone();
+            let svc_monitoring_settings = monitoring_settings.clone();
+            let subscriptions = collector_subscriptions.clone();
+            let collector_heartbeat_tx = collector_heartbeat_tx.clone();
+            let auth_ctx = AuthenticationContext::TrustedProxy(trusted_proxy_config.clone());
+
+            let close_rx = close_rx.clone();
+
+            tokio::task::spawn(async move {
+                let real_client_addr = if collector_settings.enable_proxy_protocol() {
+                    match read_proxy_protocol_header(&mut stream).await {
+                        Ok(addr) => addr,
+                        Err(err) => {
+                            warn!("Failed to read Proxy Protocol header: {}", err);
+                            return;
+                        }
+                    }
+                } else {
+                    client_addr
+                };
+
+                let io = TokioIo::new(stream);
+                let conn = http1::Builder::new().serve_connection(
+                    io,
+                    service_fn(move |req| {
+                        handle(
+                            svc_server_settings.clone(),
+                            collector_settings.clone(),
+                            svc_monitoring_settings.clone(),
+                            svc_db.clone(),
+                            subscriptions.clone(),
+                            collector_heartbeat_tx.clone(),
+                            auth_ctx.clone(),
+                            real_client_addr,
+                            req,
+                        )
+                    }),
+                );
+                pin!(conn);
+
+                tokio::select! {
+                    res = conn.as_mut() => {
+                        if let Err(err) = res {
+                            debug!("Error serving connection: {:?}", err);
+                        }
+                    },
+                    _ = shutdown_ct.cancelled() => {
+                        debug!("Shutdown signal received, closing connection with {:?}", client_addr);
+                        conn.as_mut().graceful_shutdown();
+                        if let Err(err) = conn.as_mut().await {
+                            debug!("Error serving connection: {:?}", err);
+                        };
+                    }
+                }
+
+                drop(close_rx);
+            });
+        }
+
+        drop(close_rx);
+
+        info!(
+            "Waiting for {} task(s) to finish",
+            close_tx.receiver_count()
+        );
+        close_tx.closed().await;
+
+        Ok(())
+    };
+
+    Box::pin(server)
+}
+
 enum ShutdownReason {
     CtrlC,
     Sigterm,
@@ -1275,6 +1445,19 @@ pub async fn run(settings: Settings, verbosity: u8) {
                     addr,
                 ));
             }
+            Authentication::TrustedProxyTls(trusted_proxy_tls) => {
+                servers.push(create_trusted_proxy_server(
+                    trusted_proxy_tls,
+                    collector_settings,
+                    collector_db,
+                    collector_subscriptions,
+                    collector_heartbeat_tx,
+                    collector_server_settings,
+                    collector_monitoring_settings,
+                    collector_shutdown_ct,
+                    addr,
+                ));
+            }
         };
     }
 
@@ -1297,5 +1480,28 @@ pub async fn run(settings: Settings, verbosity: u8) {
     // Wait for the task to shutdown gracefully
     if let Err(e) = heartbeat_task.await {
         error!("Failed to wait for heartbeat task to shutdown: {:?}", e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::effective_addr_from_forwarded_client_ip;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    #[test]
+    fn test_effective_addr_uses_forwarded_ip_and_preserves_backend_port() {
+        let backend_addr = SocketAddr::from((Ipv4Addr::new(10, 0, 0, 10), 5986));
+
+        let forwarded_addr = effective_addr_from_forwarded_client_ip(
+            Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 24))),
+            &backend_addr,
+        );
+        assert_eq!(
+            forwarded_addr,
+            SocketAddr::from((Ipv4Addr::new(198, 51, 100, 24), 5986))
+        );
+
+        let fallback_addr = effective_addr_from_forwarded_client_ip(None, &backend_addr);
+        assert_eq!(fallback_addr, backend_addr);
     }
 }

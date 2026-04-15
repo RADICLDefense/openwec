@@ -86,6 +86,11 @@ fn create_subscription_body(
                 collector.advertized_port(),
                 identifier
             ),
+            AuthenticationContext::TrustedProxy(_) => {
+                unreachable!(
+                    "trusted proxy configuration must be resolved before subscription handling"
+                )
+            }
         },
         connection_retry_count: subscription_data.connection_retry_count(),
         connection_retry_interval: subscription_data.connection_retry_interval(),
@@ -95,6 +100,11 @@ fn create_subscription_body(
         thumbprint: match auth_ctx {
             AuthenticationContext::Tls(_, thumbprint) => Some(thumbprint.clone()),
             AuthenticationContext::Kerberos(_) => None,
+            AuthenticationContext::TrustedProxy(_) => {
+                unreachable!(
+                    "trusted proxy configuration must be resolved before subscription handling"
+                )
+            }
         },
         locale: subscription_data.locale().cloned(),
         data_locale: subscription_data.data_locale().cloned(),

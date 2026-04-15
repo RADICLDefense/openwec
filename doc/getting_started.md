@@ -22,7 +22,7 @@ $ strip target/release/openwecd
 
 ## Basic configuration example
 
-This example uses Kerberos authentication. For a basic example using TLS, see [tls.md](tls.md).
+This example uses Kerberos authentication. For TLS-based collectors, including both direct end-to-end TLS and proxy-terminated `TrustedProxyTls`, see [tls.md](tls.md).
 
 In an Active Directory domain `DC=windomain,DC=local`, let's configure OpenWEC on a machine named `wec.windomain.local` using an SQLite database.
 

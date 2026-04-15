@@ -1,6 +1,6 @@
 [package]
 name = "cli"
-version = "0.3.1-radicl.3"
+version = "0.3.1-radicl.4"
 edition = "2021"
 
 [[bin]]

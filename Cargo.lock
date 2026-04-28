@@ -397,7 +397,7 @@ checksum = "b94f61472cee1439c0b966b47e3aca9ae07e45d070759512cd390ea2bebc6675"
 
 [[package]]
 name = "cli"
-version = "0.3.1-radicl.4"
+version = "0.3.1-radicl.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -444,7 +444,7 @@ dependencies = [
 
 [[package]]
 name = "common"
-version = "0.3.1-radicl.4"
+version = "0.3.1-radicl.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2506,7 +2506,7 @@ dependencies = [
 
 [[package]]
 name = "server"
-version = "0.3.1-radicl.4"
+version = "0.3.1-radicl.5"
 dependencies = [
  "anyhow",
  "async-trait",

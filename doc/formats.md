@@ -36,6 +36,10 @@ openwec_data := {
     "TimeReceived": date,
     /* Principal of the Windows client */
     "Principal": string,
+    /* Effective per-machine identity computed from the subscription's
+       client_identity_strategy. Identical to Principal with the default
+       Subject strategy. See doc/subscription.md#per-machine-identity-strategy. */
+    "Machine": string,
     /* OpenWEC node that received the event.
       Only present if server.node_name configuration setting is set */
     "Node": string,
@@ -83,6 +87,10 @@ openwec_data := {
     "TimeReceived": date,
     /* Principal of the Windows client */
     "Principal": string,
+    /* Effective per-machine identity computed from the subscription's
+       client_identity_strategy. Identical to Principal with the default
+       Subject strategy. See doc/subscription.md#per-machine-identity-strategy. */
+    "Machine": string,
     /* OpenWEC node that received the event.
       Only present if server.node_name configuration setting is set */
     "Node": string,
@@ -234,6 +242,7 @@ processing_error_data := {
     "IpAddress": "192.168.58.100",
     "TimeReceived": "2022-12-14T17:07:03.331+01:00",
     "Principal": "WIN10$@WINDOMAIN.LOCAL",
+    "Machine": "WIN10$@WINDOMAIN.LOCAL",
     "Node": "main",
     "Subscription": {
       "Uuid": "8B18D83D-2964-4F35-AC3B-6F4E6FFA727B",
@@ -266,6 +275,10 @@ openwec_data := {
     "TimeReceived": date,
     /* Principal of the Windows client */
     "Principal": string,
+    /* Effective per-machine identity computed from the subscription's
+       client_identity_strategy. Identical to Principal with the default
+       Subject strategy. See doc/subscription.md#per-machine-identity-strategy. */
+    "Machine": string,
     /* OpenWEC node that received the event.
       Only present if server.node_name configuration setting is set */
     "Node": string,

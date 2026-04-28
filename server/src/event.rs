@@ -500,6 +500,7 @@ pub struct EventMetadata {
     // TODO : add authentication method (TLS or Kerberos)
     addr: SocketAddr,
     client: String,
+    machine: String,
     node_name: Option<String>,
     time_received: DateTime<Utc>,
     subscription_uuid: String,
@@ -514,6 +515,7 @@ impl EventMetadata {
     pub fn new(
         addr: &SocketAddr,
         client: &str,
+        machine: &str,
         node_name: Option<String>,
         subscription: &Subscription,
         public_version: String,
@@ -522,6 +524,7 @@ impl EventMetadata {
         EventMetadata {
             addr: *addr,
             client: client.to_owned(),
+            machine: machine.to_owned(),
             node_name,
             time_received: Utc::now(),
             subscription_uuid: subscription.data().uuid_string(),
@@ -545,6 +548,16 @@ impl EventMetadata {
 
     pub fn client(&self) -> &str {
         self.client.as_ref()
+    }
+
+    /// Effective machine identity for this event. This is derived from the
+    /// subscription's `MachineIdentityStrategy` and may differ from `client()`
+    /// (for example, when the strategy is `MachineID` or `SubjectAndMachineID`).
+    /// It is the key used for bookmarks, heartbeats and the `MACHINE` metric
+    /// label, and is exposed to outputs as the `{machine}` template variable
+    /// and the `Machine` field in JSON-based formatters.
+    pub fn machine(&self) -> &str {
+        self.machine.as_ref()
     }
 
     pub fn node_name(&self) -> Option<&String> {

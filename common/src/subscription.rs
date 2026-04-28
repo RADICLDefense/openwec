@@ -284,6 +284,77 @@ pub enum ClientFilterKind {
     MachineID,
 }
 
+/// Strategy used to identify a machine for the purpose of bookmark and
+/// heartbeat storage.
+///
+/// `Subject` is the historical default (the client identifier as derived
+/// from authentication, i.e. TLS certificate subject or Kerberos principal).
+///
+/// `MachineID` uses only the `<m:MachineID>` SOAP header sent by the client.
+///
+/// `SubjectAndMachineID` composes both into a single key and is intended for
+/// deployments where the same TLS certificate is shared across multiple
+/// physical machines (such as some "tenant certificate" deployments) so that
+/// each machine gets its own bookmark and heartbeat row.
+#[derive(
+    Default,
+    Debug,
+    Clone,
+    Copy,
+    Eq,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    Display,
+    AsRefStr,
+    EnumString,
+)]
+#[strum(ascii_case_insensitive)]
+pub enum MachineIdentityStrategy {
+    #[default]
+    Subject,
+    MachineID,
+    SubjectAndMachineID,
+}
+
+pub const DEFAULT_CLIENT_IDENTITY_STRATEGY: MachineIdentityStrategy =
+    MachineIdentityStrategy::Subject;
+
+/// Separator used between the subject and the lowercased `MachineID` when
+/// composing a `SubjectAndMachineID` key.
+///
+/// `__` is intentional: every consumer of the effective machine key needs the
+/// same string (database column, JSON `Machine` field, file paths produced by
+/// the Files driver, metric labels, CLI lookups). The Files driver runs the
+/// effective key through `sanitize_name`, which only keeps `[a-zA-Z0-9.-_@]`,
+/// so any other separator would be silently stripped on disk and produce an
+/// ambiguous path that no longer matches what is stored in the database.
+pub const MACHINE_KEY_SEPARATOR: &str = "__";
+
+/// Compute the effective machine key for a given subscription strategy,
+/// authenticated subject (`client`) and optional SOAP `MachineID` header.
+///
+/// The `MachineID` portion is lowercased to make the key resilient to
+/// hostname case changes by Windows clients.
+///
+/// Returns `None` if the strategy requires a `MachineID` but none is provided
+/// in the SOAP header. Callers should treat this as "skip storage / cannot
+/// identify the client" rather than fall back silently.
+pub fn compute_machine_key(
+    strategy: MachineIdentityStrategy,
+    client: &str,
+    machine_id: Option<&str>,
+) -> Option<String> {
+    match strategy {
+        MachineIdentityStrategy::Subject => Some(client.to_owned()),
+        MachineIdentityStrategy::MachineID => machine_id.map(|m| m.to_lowercase()),
+        MachineIdentityStrategy::SubjectAndMachineID => {
+            let machine_id = machine_id?.to_lowercase();
+            Some(format!("{client}{MACHINE_KEY_SEPARATOR}{machine_id}"))
+        }
+    }
+}
+
 bitflags! {
     #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
     pub struct ClientFilterFlags: u32 {
@@ -600,6 +671,20 @@ pub struct SubscriptionData {
     enabled: bool,
     // Configure which client can see the subscription
     client_filter: Option<ClientFilter>,
+    // Strategy used to derive the per-machine identity used as the
+    // primary key in bookmarks/heartbeats. This is server-side state
+    // and is intentionally NOT part of `SubscriptionParameters` so that
+    // changing it does not bump the public subscription version, which
+    // would force every client to re-enumerate.
+    client_identity_strategy: MachineIdentityStrategy,
+    // Optional fallback strategy used only when reading bookmarks. When
+    // set, openwec will look up bookmarks using
+    // `client_identity_strategy` first and, if no row is found, retry
+    // using this strategy. The first retrieved bookmark is then re-keyed
+    // under `client_identity_strategy` on the next event push so that the
+    // migration is sticky. This enables seamless transitions between
+    // strategies (e.g. legacy `Subject` => `SubjectAndMachineID`).
+    client_identity_fallback_strategy: Option<MachineIdentityStrategy>,
     // Public parameters of the subscriptions. This structure is used
     // to compute the public subscription version sent to clients.
     parameters: SubscriptionParameters,
@@ -690,6 +775,19 @@ impl Display for SubscriptionData {
                 )?;
             }
         }
+        writeln!(
+            f,
+            "\tClient identity strategy: {}",
+            self.client_identity_strategy()
+        )?;
+        writeln!(
+            f,
+            "\tClient identity fallback strategy: {}",
+            match self.client_identity_fallback_strategy() {
+                Some(strategy) => strategy.to_string(),
+                None => "Not configured".to_string(),
+            }
+        )?;
         if self.outputs().is_empty() {
             writeln!(f, "\tOutputs: Not configured")?;
         } else {
@@ -712,6 +810,8 @@ impl SubscriptionData {
             uri: None,
             enabled: DEFAULT_ENABLED,
             client_filter: None,
+            client_identity_strategy: DEFAULT_CLIENT_IDENTITY_STRATEGY,
+            client_identity_fallback_strategy: None,
             outputs: Vec::new(),
             parameters: SubscriptionParameters {
                 name: name.to_string(),
@@ -983,6 +1083,37 @@ impl SubscriptionData {
         self
     }
 
+    /// Returns the strategy used to derive the per-machine identity for
+    /// bookmarks and heartbeats.
+    pub fn client_identity_strategy(&self) -> MachineIdentityStrategy {
+        self.client_identity_strategy
+    }
+
+    pub fn set_client_identity_strategy(&mut self, strategy: MachineIdentityStrategy) -> &mut Self {
+        self.client_identity_strategy = strategy;
+        // This is server-side only, and switching strategies must not bump
+        // the public subscription version (which would force every client
+        // to re-enumerate). It is still useful to bump the *internal*
+        // version so that other openwec nodes pick up the change.
+        self.update_internal_version();
+        self
+    }
+
+    /// Optional fallback strategy used only when reading bookmarks if the
+    /// primary strategy yields no row.
+    pub fn client_identity_fallback_strategy(&self) -> Option<MachineIdentityStrategy> {
+        self.client_identity_fallback_strategy
+    }
+
+    pub fn set_client_identity_fallback_strategy(
+        &mut self,
+        strategy: Option<MachineIdentityStrategy>,
+    ) -> &mut Self {
+        self.client_identity_fallback_strategy = strategy;
+        self.update_internal_version();
+        self
+    }
+
     pub fn is_active_for(&self, client: &str, machine_id: Option<&str>) -> bool {
         if !self.is_active() {
             return false;
@@ -1229,5 +1360,125 @@ mod tests {
             ClientFilterFlags::GlobPattern | ClientFilterFlags::CaseInsensitive
         );
         assert_eq!(filter.targets(), expected_targets);
+    }
+
+    #[test]
+    fn test_compute_machine_key_subject() {
+        let strategy = MachineIdentityStrategy::Subject;
+        assert_eq!(
+            compute_machine_key(strategy, "host.example.com", None),
+            Some("host.example.com".to_owned())
+        );
+        assert_eq!(
+            compute_machine_key(strategy, "host.example.com", Some("WIN10.example.com")),
+            Some("host.example.com".to_owned())
+        );
+    }
+
+    #[test]
+    fn test_compute_machine_key_machine_id() {
+        let strategy = MachineIdentityStrategy::MachineID;
+        assert_eq!(
+            compute_machine_key(strategy, "host.example.com", Some("WIN10.example.com")),
+            Some("win10.example.com".to_owned())
+        );
+        assert_eq!(
+            compute_machine_key(strategy, "host.example.com", None),
+            None
+        );
+    }
+
+    #[test]
+    fn test_compute_machine_key_subject_and_machine_id() {
+        let strategy = MachineIdentityStrategy::SubjectAndMachineID;
+        assert_eq!(
+            compute_machine_key(strategy, "tenant-cert@REALM", Some("WIN10.example.com")),
+            Some("tenant-cert@REALM__win10.example.com".to_owned())
+        );
+        assert_eq!(
+            compute_machine_key(strategy, "tenant-cert@REALM", None),
+            None
+        );
+    }
+
+    /// Regression test for the on-disk / in-database key format. The Files
+    /// driver runs the effective key through a `[a-zA-Z0-9.-_@]` whitelist.
+    /// The separator chosen here MUST stay inside that whitelist or paths
+    /// will silently diverge from database rows. This test pins the
+    /// separator and the whitelist together so a future change to either
+    /// is immediately visible.
+    #[test]
+    fn test_compute_machine_key_separator_is_filename_safe() {
+        let key = compute_machine_key(
+            MachineIdentityStrategy::SubjectAndMachineID,
+            "tenant-cert@REALM",
+            Some("win10.example.com"),
+        )
+        .expect("key");
+        assert!(
+            key.contains(MACHINE_KEY_SEPARATOR),
+            "separator missing from composed key {key:?}"
+        );
+        for ch in MACHINE_KEY_SEPARATOR.chars() {
+            assert!(
+                ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_' || ch == '@',
+                "separator char {ch:?} is not in the Files-driver filename whitelist; \
+                 picking it will cause on-disk paths to diverge from the database key"
+            );
+        }
+    }
+
+    #[test]
+    fn test_machine_identity_strategy_parse() {
+        use std::str::FromStr;
+
+        assert_eq!(
+            MachineIdentityStrategy::from_str("subject").unwrap(),
+            MachineIdentityStrategy::Subject
+        );
+        assert_eq!(
+            MachineIdentityStrategy::from_str("MachineID").unwrap(),
+            MachineIdentityStrategy::MachineID
+        );
+        assert_eq!(
+            MachineIdentityStrategy::from_str("subjectandmachineid").unwrap(),
+            MachineIdentityStrategy::SubjectAndMachineID
+        );
+        assert_eq!(
+            MachineIdentityStrategy::default(),
+            MachineIdentityStrategy::Subject
+        );
+    }
+
+    #[test]
+    fn test_subscription_data_identity_accessors() {
+        let mut sub = SubscriptionData::new("test", "<QueryList/>");
+        assert_eq!(
+            sub.client_identity_strategy(),
+            MachineIdentityStrategy::Subject
+        );
+        assert_eq!(sub.client_identity_fallback_strategy(), None);
+
+        sub.set_client_identity_strategy(MachineIdentityStrategy::SubjectAndMachineID);
+        sub.set_client_identity_fallback_strategy(Some(MachineIdentityStrategy::Subject));
+
+        assert_eq!(
+            sub.client_identity_strategy(),
+            MachineIdentityStrategy::SubjectAndMachineID
+        );
+        assert_eq!(
+            sub.client_identity_fallback_strategy(),
+            Some(MachineIdentityStrategy::Subject)
+        );
+
+        // Identity strategy must NOT influence the public version, only
+        // the internal version.
+        let mut sub2 = SubscriptionData::new("test", "<QueryList/>");
+        sub2.set_uuid(*sub.uuid());
+        // Force public version to match by aligning all parameter inputs
+        // (they have the same name/query and all defaults).
+        let v1 = sub.public_version().unwrap();
+        let v2 = sub2.public_version().unwrap();
+        assert_eq!(v1, v2);
     }
 }

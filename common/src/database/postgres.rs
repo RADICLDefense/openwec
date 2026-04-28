@@ -31,8 +31,8 @@ use crate::bookmark::BookmarkData;
 use crate::heartbeat::{HeartbeatKey, HeartbeatsCache};
 use crate::settings::PostgresSslMode;
 use crate::subscription::{
-    ClientFilter, ContentFormat, InternalVersion, SubscriptionMachine, SubscriptionMachineState,
-    SubscriptionStatsCounters, SubscriptionUuid,
+    ClientFilter, ContentFormat, InternalVersion, MachineIdentityStrategy, SubscriptionMachine,
+    SubscriptionMachineState, SubscriptionStatsCounters, SubscriptionUuid,
 };
 use crate::{
     database::Database, heartbeat::HeartbeatData, settings::Postgres,
@@ -229,6 +229,14 @@ fn row_to_subscription(row: &Row) -> Result<SubscriptionData> {
         None => None,
     };
 
+    let client_identity_strategy: String = row.try_get("client_identity_strategy")?;
+    let client_identity_strategy = MachineIdentityStrategy::from_str(&client_identity_strategy)?;
+    let client_identity_fallback_strategy: Option<String> =
+        row.try_get("client_identity_fallback_strategy")?;
+    let client_identity_fallback_strategy = client_identity_fallback_strategy
+        .map(|s| MachineIdentityStrategy::from_str(&s))
+        .transpose()?;
+
     let mut subscription = SubscriptionData::new(row.try_get("name")?, row.try_get("query")?);
     subscription
         .set_uuid(SubscriptionUuid(Uuid::parse_str(row.try_get("uuid")?)?))
@@ -250,6 +258,8 @@ fn row_to_subscription(row: &Row) -> Result<SubscriptionData> {
         .set_locale(row.try_get("locale")?)
         .set_data_locale(row.try_get("data_locale")?)
         .set_client_filter(client_filter)
+        .set_client_identity_strategy(client_identity_strategy)
+        .set_client_identity_fallback_strategy(client_identity_fallback_strategy)
         .set_outputs(outputs);
 
     // This needs to be done at the end because version is updated each time
@@ -647,6 +657,10 @@ impl Database for PostgresDatabase {
         let client_filter_targets = subscription
             .client_filter()
             .and_then(|f| f.targets_to_opt_string());
+        let client_identity_strategy = subscription.client_identity_strategy().to_string();
+        let client_identity_fallback_strategy = subscription
+            .client_identity_fallback_strategy()
+            .map(|s| s.to_string());
 
         let count = self
             .pool
@@ -657,8 +671,8 @@ impl Database for PostgresDatabase {
                     heartbeat_interval, connection_retry_count, connection_retry_interval,
                     max_time, max_elements, max_envelope_size, enabled, read_existing_events, content_format,
                     ignore_channel_error, client_filter_op, client_filter_kind, client_filter_flags, client_filter_targets, outputs, locale,
-                    data_locale)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
+                    data_locale, client_identity_strategy, client_identity_fallback_strategy)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
                     ON CONFLICT (uuid) DO UPDATE SET
                         version = excluded.version,
                         revision = excluded.revision,
@@ -681,7 +695,9 @@ impl Database for PostgresDatabase {
                         client_filter_targets = excluded.client_filter_targets,
                         outputs = excluded.outputs,
                         locale = excluded.locale,
-                        data_locale = excluded.data_locale"#,
+                        data_locale = excluded.data_locale,
+                        client_identity_strategy = excluded.client_identity_strategy,
+                        client_identity_fallback_strategy = excluded.client_identity_fallback_strategy"#,
                 &[
                     &subscription.uuid_string(),
                     &subscription.internal_version().to_string(),
@@ -705,7 +721,9 @@ impl Database for PostgresDatabase {
                     &client_filter_targets,
                     &serde_json::to_string(subscription.outputs())?.as_str(),
                     &subscription.locale(),
-                    &subscription.data_locale()
+                    &subscription.data_locale(),
+                    &client_identity_strategy,
+                    &client_identity_fallback_strategy,
                 ],
             )
             .await?;

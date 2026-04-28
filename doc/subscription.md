@@ -46,6 +46,8 @@ Subscriptions and their parameters are not defined in OpenWEC configuration file
 | `ignore_channel_error` | No | `true` | This option determines if various filtering options resulting in errors are to result in termination of the processing by clients. |
 | `locale` | No | *Undefined* | This option determines the language in which openwec wants the rendering info data to be translated. Defaults to unset, meaning OpenWEC lets the clent choose. |
 | `data_locale` | No | *Undefined* | This option determines the language in which openwec wants the numerical data to be formatted. Defaults to unset, meaning OpenWEC lets the clent choose. |
+| `client_identity_strategy` | No | `Subject` | How openwec identifies a unique machine when storing bookmarks, heartbeats and per-machine metrics. See [Per-machine identity strategy](subscription.md#per-machine-identity-strategy). |
+| `client_identity_fallback_strategy` | No | *Undefined* | Optional fallback strategy used only when reading bookmarks. Useful when migrating an existing subscription from one identity strategy to another. See [Migrating an existing subscription](subscription.md#migrating-an-existing-subscription). |
 
 ## Subscription management
 
@@ -93,6 +95,64 @@ The default is `Client`.
 
 Flags are composable using the `|` operator.
 The comparison is **case-sensitive** by default.
+
+## Per-machine identity strategy
+
+By default, OpenWEC identifies a unique machine using the value returned by the chosen authentication mechanism: the TLS certificate subject for [TLS](tls.md), the Kerberos principal for Kerberos, or the principal supplied by the proxy for [trusted proxy TLS](tls.md). This identity is referred to as the *client* throughout this documentation and is exposed as the `{client}` template variable for the [`Files` output](outputs.md).
+
+That choice is correct when each machine has its own credential. It breaks down when several machines share a credential, for example when a tenant provisions a single TLS client certificate that is then deployed to dozens or hundreds of forwarders. In that case every machine reports the same `client`, which means:
+
+- they share a single bookmark row, and the slowest machine effectively rewinds the others;
+- they share heartbeats, so the `clients` / `heartbeats` views cannot tell the machines apart;
+- per-machine metrics are aggregated under the same `MACHINE` label.
+
+To support this case, each subscription can opt into a different identity strategy via the `client_identity_strategy` parameter:
+
+| Strategy | Effective key | When to use it |
+|---|---|---|
+| `Subject` (default) | `{client}` | Each machine has its own credential. Same behavior as previous releases. |
+| `MachineID` | lowercased `<m:MachineID>` SOAP header | You trust the SOAP `MachineID` advertised by the client and want the bookmark/heartbeat keyed only on it. Note: `MachineID` is not cryptographically authenticated (see [Hunting rogue Windows Event Forwarder](issues.md#hunting-rogue-windows-event-forwarder)). |
+| `SubjectAndMachineID` | `{client}__<lowercased MachineID>` (subject and lowercased MachineID joined by a double underscore) | Several machines share a credential. This composite key keeps the per-tenant separation enforced by `Subject` while still giving each machine its own bookmark, heartbeat and metric labels. |
+
+The effective key is also exposed as the `{machine}` template variable for the [`Files` output](outputs.md), and as the `Machine` field in [JSON-based formats](formats.md). When using `Subject` (the default), `{machine}` is identical to `{client}`. The `__` separator used for `SubjectAndMachineID` is chosen so the key reads identically everywhere it appears (database row, JSON field, file path produced by the Files driver, metric label, CLI lookups), even after the Files driver's filename sanitization pass.
+
+If `client_identity_strategy` is set to `MachineID` or `SubjectAndMachineID` and a request arrives without a SOAP `MachineID` header (which should not happen with real Windows clients), OpenWEC rejects the request with a `400 Bad Request`. Switching to `MachineID` or `SubjectAndMachineID` therefore tightens the subscription to clients that send a `MachineID`.
+
+`MachineID` is lowercased before being used as part of the effective key, so a client that toggles the case of its hostname (which Windows tends to do) will keep the same bookmark.
+
+### Trade-offs
+
+- Switching from `Subject` to `SubjectAndMachineID` (or `MachineID`) on a subscription that already has many distinct clients will multiply the number of bookmark/heartbeat rows by the average number of machines sharing each credential. This is the intended effect; it is what gives you per-machine granularity.
+- A change of the SOAP `MachineID` (machine rename, OS reinstall, etc.) is treated as a brand new machine: a fresh bookmark row will be created and that machine will start at the head of its event channels (or replay them all if `read_existing_events = true`). This is unavoidable when the identity itself changes.
+- The strategy is server-side only. Clients are not aware of it, so changing it does **not** force a Windows client to re-enumerate the subscription.
+
+### Migrating an existing subscription
+
+When you change `client_identity_strategy` on a subscription that already has stored bookmarks, those bookmarks live under the old key. To avoid replaying events while the new identity catches up, set `client_identity_fallback_strategy` to the previous strategy. OpenWEC will then:
+
+1. Look up the bookmark for the new effective key.
+2. If none exists, look it up using the fallback strategy and use that value for the current request.
+3. On the next event push, the bookmark is rewritten under the new effective key.
+
+This effectively migrates each machine to the new identity the next time it pushes events, with no event loss and no replay. Once every active machine has pushed at least once you can safely remove `client_identity_fallback_strategy`.
+
+For example, to migrate `my-sub` from the default `Subject` strategy to `SubjectAndMachineID`:
+
+```toml
+[options]
+client_identity_strategy = "SubjectAndMachineID"
+client_identity_fallback_strategy = "Subject"
+```
+
+After a full event aggregation cycle (typically `max_time` seconds plus the round trip), drop the fallback:
+
+```toml
+[options]
+client_identity_strategy = "SubjectAndMachineID"
+```
+
+> [!warning]
+> The fallback only fires when *no* bookmark is found under the primary key. Once a machine has stored its first bookmark under the new key, the fallback is no longer consulted for that machine. Removing the fallback after every machine has pushed at least once is therefore safe.
 
 ## Configuration
 

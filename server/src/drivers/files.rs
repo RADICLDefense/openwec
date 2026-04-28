@@ -256,6 +256,8 @@ impl leon::Values for PathValues {
             Some(Cow::from(self.metadata.addr().ip().to_string()))
         } else if key == "principal" || key == "client" {
             Some(sanitize_name(self.metadata.client()).into())
+        } else if key == "machine" {
+            Some(sanitize_name(self.metadata.machine()).into())
         } else if key == "node" {
             if let Some(node_name) = self.metadata.node_name() {
                 Some(node_name.as_str().into())
@@ -383,7 +385,10 @@ mod tests {
 
     use common::{
         settings,
-        subscription::{SubscriptionData, SubscriptionUuid},
+        subscription::{
+            compute_machine_key, MachineIdentityStrategy, SubscriptionData, SubscriptionUuid,
+            MACHINE_KEY_SEPARATOR,
+        },
     };
     use uuid::Uuid;
 
@@ -409,6 +414,7 @@ mod tests {
 
         Arc::new(EventMetadata::new(
             &addr,
+            principal,
             principal,
             node_name,
             &subscription,
@@ -535,6 +541,65 @@ mod tests {
             output_file.build_path(&event_metadata_without_node)?,
             PathBuf::from_str("/base/COMPUTER@REALM/messages")?
         );
+        Ok(())
+    }
+
+    /// End-to-end check that the `{machine}` template variable produces a
+    /// path that matches what `compute_machine_key` actually stores in the
+    /// database. The separator must survive `sanitize_name` so an operator
+    /// can pivot from a file path back to a `bookmarks`/`heartbeats` row by
+    /// stripping the surrounding path components.
+    ///
+    /// `sanitize_name` still strips characters that aren't filename-safe
+    /// (e.g. `$`), so we compare against the sanitized form of the key
+    /// rather than against a hand-typed literal.
+    #[tokio::test]
+    async fn test_build_path_machine_variable() -> Result<()> {
+        let ip: IpAddr = "127.0.0.1".parse()?;
+        let principal = "WIN10$@WINDOMAIN.LOCAL";
+        let machine_id = "WIN10.windomain.local";
+        let machine_value = compute_machine_key(
+            MachineIdentityStrategy::SubjectAndMachineID,
+            principal,
+            Some(machine_id),
+        )
+        .expect("compute_machine_key returned None");
+        assert!(
+            machine_value.contains(MACHINE_KEY_SEPARATOR),
+            "composed key {machine_value:?} must contain {MACHINE_KEY_SEPARATOR:?}",
+        );
+
+        let addr = SocketAddr::new(ip, 8080);
+        let mut output_context = OutputDriversContext::new(&settings::Outputs::default());
+        let mut subscription_data = SubscriptionData::new("Test", "");
+        subscription_data.set_uuid(SubscriptionUuid(
+            Uuid::from_str("8B18D83D-2964-4F35-AC3B-6F4E6FFA727B").unwrap(),
+        ));
+        let subscription = Subscription::from_data(subscription_data, &mut output_context).unwrap();
+
+        let metadata = Arc::new(EventMetadata::new(
+            &addr,
+            principal,
+            &machine_value,
+            None,
+            &subscription,
+            subscription.public_version_string(),
+            None,
+        ));
+
+        let context = Some(OutputFilesContext::new());
+        let config = FilesConfiguration::new("/base/{machine}/messages".to_string());
+        let output_file = OutputFiles::new(&config, &context)?;
+        let actual = output_file.build_path(&metadata)?;
+        let expected =
+            PathBuf::from_str(&format!("/base/{}/messages", sanitize_name(&machine_value)))?;
+        assert_eq!(actual, expected);
+        let actual_str = actual.to_string_lossy();
+        assert!(
+            actual_str.contains(MACHINE_KEY_SEPARATOR),
+            "separator {MACHINE_KEY_SEPARATOR:?} did not survive sanitize_name in path {actual_str}",
+        );
+
         Ok(())
     }
 }

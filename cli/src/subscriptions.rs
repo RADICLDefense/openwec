@@ -3,9 +3,10 @@ use common::{
     encoding::decode_utf16le,
     settings::Settings,
     subscription::{
-        ContentFormat, FilesConfiguration, KafkaConfiguration, RedisConfiguration,
-        SubscriptionData, SubscriptionMachineState, SubscriptionOutput, SubscriptionOutputDriver,
-        SubscriptionOutputFormat, TcpConfiguration, UnixDatagramConfiguration,
+        ContentFormat, FilesConfiguration, KafkaConfiguration, MachineIdentityStrategy,
+        RedisConfiguration, SubscriptionData, SubscriptionMachineState, SubscriptionOutput,
+        SubscriptionOutputDriver, SubscriptionOutputFormat, TcpConfiguration,
+        UnixDatagramConfiguration,
     },
 };
 use roxmltree::{Document, Node};
@@ -351,6 +352,33 @@ async fn edit(db: &Db, matches: &ArgMatches) -> Result<()> {
         subscription.set_ignore_channel_error(*ignore_channel_error);
     }
 
+    if let Some(strategy) = matches.get_one::<String>("client-identity-strategy") {
+        let new_strategy = MachineIdentityStrategy::from_str(strategy)
+            .context("Parse client-identity-strategy argument")?;
+        debug!(
+            "Update client_identity_strategy from {} to {}",
+            subscription.client_identity_strategy(),
+            new_strategy
+        );
+        subscription.set_client_identity_strategy(new_strategy);
+    }
+
+    if matches.contains_id("client-identity-fallback-strategy") {
+        let new_fallback = match matches.get_one::<String>("client-identity-fallback-strategy") {
+            Some(strategy) => Some(
+                MachineIdentityStrategy::from_str(strategy)
+                    .context("Parse client-identity-fallback-strategy argument")?,
+            ),
+            None => None,
+        };
+        debug!(
+            "Update client_identity_fallback_strategy from {:?} to {:?}",
+            subscription.client_identity_fallback_strategy(),
+            new_fallback
+        );
+        subscription.set_client_identity_fallback_strategy(new_fallback);
+    }
+
     if matches.contains_id("locale") {
         if let Some(locale) = matches.get_one::<String>("locale") {
             debug!(
@@ -444,6 +472,18 @@ async fn new(db: &Db, matches: &ArgMatches) -> Result<()> {
 
     if let Some(max_envelope_size) = matches.get_one::<u32>("max-envelope-size") {
         subscription.set_max_envelope_size(*max_envelope_size);
+    }
+
+    if let Some(strategy) = matches.get_one::<String>("client-identity-strategy") {
+        let parsed = MachineIdentityStrategy::from_str(strategy)
+            .context("Parse client-identity-strategy argument")?;
+        subscription.set_client_identity_strategy(parsed);
+    }
+
+    if let Some(strategy) = matches.get_one::<String>("client-identity-fallback-strategy") {
+        let parsed = MachineIdentityStrategy::from_str(strategy)
+            .context("Parse client-identity-fallback-strategy argument")?;
+        subscription.set_client_identity_fallback_strategy(Some(parsed));
     }
 
     debug!(

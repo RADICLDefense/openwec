@@ -591,7 +591,8 @@ mod tests {
         let config = FilesConfiguration::new("/base/{machine}/messages".to_string());
         let output_file = OutputFiles::new(&config, &context)?;
         let actual = output_file.build_path(&metadata)?;
-        let expected = PathBuf::from_str(&format!("/base/{}/messages", sanitize_name(&machine_value)))?;
+        let expected =
+            PathBuf::from_str(&format!("/base/{}/messages", sanitize_name(&machine_value)))?;
         assert_eq!(actual, expected);
         let actual_str = actual.to_string_lossy();
         assert!(

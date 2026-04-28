@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.3.1-radicl.5]
+
 ### Added
 
 - Per-subscription `client_identity_strategy` (`Subject` (default), `MachineID`, `SubjectAndMachineID`) so multiple machines that share a TLS certificate or Kerberos principal can each get their own bookmark, heartbeat and per-machine metric labels. Includes an optional `client_identity_fallback_strategy` for migrating an existing subscription without replaying events. Exposes a new `{machine}` template variable in the `Files` driver and a new `Machine` field in the `Json`, `RawJson` and `Nxlog` formats. (**Warning: this requires a database migration**)

@@ -125,9 +125,9 @@ pub mod tests {
         heartbeat::{HeartbeatKey, HeartbeatValue},
         subscription::{
             ClientFilter, ClientFilterFlags, ClientFilterKind, ClientFilterOperation,
-            ContentFormat, FilesConfiguration, SubscriptionOutput, SubscriptionOutputDriver,
-            SubscriptionOutputFormat, DEFAULT_CONTENT_FORMAT, DEFAULT_IGNORE_CHANNEL_ERROR,
-            DEFAULT_READ_EXISTING_EVENTS,
+            ContentFormat, FilesConfiguration, MachineIdentityStrategy, SubscriptionOutput,
+            SubscriptionOutputDriver, SubscriptionOutputFormat, DEFAULT_CONTENT_FORMAT,
+            DEFAULT_IGNORE_CHANNEL_ERROR, DEFAULT_READ_EXISTING_EVENTS,
         },
     };
 
@@ -180,6 +180,11 @@ pub mod tests {
         assert_eq!(toto.data_locale(), None);
         assert_eq!(toto.locale(), None);
         assert_eq!(toto.max_elements(), None);
+        assert_eq!(
+            toto.client_identity_strategy(),
+            MachineIdentityStrategy::Subject
+        );
+        assert_eq!(toto.client_identity_fallback_strategy(), None);
 
         let toto2 = db.get_subscription_by_identifier("toto").await?.unwrap();
         assert_eq!(toto, &toto2);
@@ -394,7 +399,7 @@ pub mod tests {
 
         db.store_subscription(&tata2_clone).await?;
 
-        let tata2_clone_clone = db
+        let mut tata2_clone_clone = db
             .get_subscription_by_identifier(&tata.uuid_string())
             .await?
             .unwrap();
@@ -402,6 +407,24 @@ pub mod tests {
         assert_eq!(tata2_clone_clone.is_active_for("couscous", None), true);
         assert_eq!(tata2_clone_clone.is_active_for("semoule", None), true);
         assert_eq!(tata2_clone_clone.is_active_for("boulette", None), true);
+
+        // Verify identity strategy persistence round-trip
+        tata2_clone_clone
+            .set_client_identity_strategy(MachineIdentityStrategy::SubjectAndMachineID)
+            .set_client_identity_fallback_strategy(Some(MachineIdentityStrategy::Subject));
+        db.store_subscription(&tata2_clone_clone).await?;
+        let after_identity_round_trip = db
+            .get_subscription_by_identifier(&tata.uuid_string())
+            .await?
+            .unwrap();
+        assert_eq!(
+            after_identity_round_trip.client_identity_strategy(),
+            MachineIdentityStrategy::SubjectAndMachineID
+        );
+        assert_eq!(
+            after_identity_round_trip.client_identity_fallback_strategy(),
+            Some(MachineIdentityStrategy::Subject)
+        );
 
         db.delete_subscription(&toto3.uuid_string()).await?;
         ensure!(

@@ -41,8 +41,8 @@ use crate::bookmark::BookmarkData;
 use crate::database::Database;
 use crate::heartbeat::{HeartbeatData, HeartbeatsCache};
 use crate::subscription::{
-    ClientFilter, ContentFormat, InternalVersion, SubscriptionData, SubscriptionMachine,
-    SubscriptionMachineState, SubscriptionStatsCounters, SubscriptionUuid,
+    ClientFilter, ContentFormat, InternalVersion, MachineIdentityStrategy, SubscriptionData,
+    SubscriptionMachine, SubscriptionMachineState, SubscriptionStatsCounters, SubscriptionUuid,
 };
 
 use super::schema::{Migration, MigrationBase, Version};
@@ -186,6 +186,14 @@ fn row_to_subscription(row: &Row) -> Result<SubscriptionData> {
         None => None,
     };
 
+    let client_identity_strategy: String = row.get("client_identity_strategy")?;
+    let client_identity_strategy = MachineIdentityStrategy::from_str(&client_identity_strategy)?;
+    let client_identity_fallback_strategy: Option<String> =
+        row.get("client_identity_fallback_strategy")?;
+    let client_identity_fallback_strategy = client_identity_fallback_strategy
+        .map(|s| MachineIdentityStrategy::from_str(&s))
+        .transpose()?;
+
     let mut subscription = SubscriptionData::new(&name, &query);
     subscription
         .set_uuid(SubscriptionUuid(Uuid::parse_str(&uuid)?))
@@ -204,6 +212,8 @@ fn row_to_subscription(row: &Row) -> Result<SubscriptionData> {
         .set_locale(row.get("locale")?)
         .set_data_locale(row.get("data_locale")?)
         .set_client_filter(client_filter)
+        .set_client_identity_strategy(client_identity_strategy)
+        .set_client_identity_fallback_strategy(client_identity_fallback_strategy)
         .set_outputs(outputs);
 
     // This needs to be done at the end because version is updated each time
@@ -584,6 +594,10 @@ impl Database for SQLiteDatabase {
         let client_filter_targets = subscription
             .client_filter()
             .and_then(|f| f.targets_to_opt_string());
+        let client_identity_strategy = subscription.client_identity_strategy().to_string();
+        let client_identity_fallback_strategy = subscription
+            .client_identity_fallback_strategy()
+            .map(|s| s.to_string());
 
         let count = self
             .pool
@@ -595,12 +609,12 @@ impl Database for SQLiteDatabase {
                     heartbeat_interval, connection_retry_count, connection_retry_interval,
                     max_time, max_elements, max_envelope_size, enabled, read_existing_events, content_format,
                     ignore_channel_error, client_filter_op, client_filter_kind, client_filter_flags, client_filter_targets, outputs, locale,
-                    data_locale)
+                    data_locale, client_identity_strategy, client_identity_fallback_strategy)
                     VALUES (:uuid, :version, :revision, :name, :uri, :query,
                         :heartbeat_interval, :connection_retry_count, :connection_retry_interval,
                         :max_time, :max_elements, :max_envelope_size, :enabled, :read_existing_events, :content_format,
                         :ignore_channel_error, :client_filter_op, :client_filter_kind, :client_filter_flags, :client_filter_targets, :outputs,
-                        :locale, :data_locale)
+                        :locale, :data_locale, :client_identity_strategy, :client_identity_fallback_strategy)
                     ON CONFLICT (uuid) DO UPDATE SET
                         version = excluded.version,
                         revision = excluded.revision,
@@ -623,7 +637,9 @@ impl Database for SQLiteDatabase {
                         client_filter_targets = excluded.client_filter_targets,
                         outputs = excluded.outputs,
                         locale = excluded.locale,
-                        data_locale = excluded.data_locale"#,
+                        data_locale = excluded.data_locale,
+                        client_identity_strategy = excluded.client_identity_strategy,
+                        client_identity_fallback_strategy = excluded.client_identity_fallback_strategy"#,
                     named_params! {
                         ":uuid": subscription.uuid_string(),
                         ":version": subscription.internal_version().to_string(),
@@ -648,6 +664,8 @@ impl Database for SQLiteDatabase {
                         ":outputs": serde_json::to_string(subscription.outputs())?,
                         ":locale": subscription.locale(),
                         ":data_locale": subscription.data_locale(),
+                        ":client_identity_strategy": client_identity_strategy,
+                        ":client_identity_fallback_strategy": client_identity_fallback_strategy,
                     },
                 )
                 .map_err(|err| anyhow!(err))

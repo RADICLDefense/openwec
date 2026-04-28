@@ -73,6 +73,23 @@ async fn main() {
                     .arg(
                         arg!(--"ignore-channel-error" <BOOL> "Configure clients to ignore filtering errors or not. Defaults to true").value_parser(value_parser!(bool)).default_value("true")
                     )
+                    .arg(
+                        arg!(--"client-identity-strategy" <STRATEGY> "How openwec identifies a unique \
+                        machine for bookmarks, heartbeats and per-machine metrics. \
+                        Use 'Subject' (default) when each machine has its own client certificate / Kerberos principal. \
+                        Use 'SubjectAndMachineID' or 'MachineID' when several machines share an identity (e.g. a tenant-wide TLS certificate). \
+                        See the \"Per-machine identity strategy\" section in doc/subscription.md.")
+                        .value_parser(["Subject", "MachineID", "SubjectAndMachineID"])
+                    )
+                    .arg(
+                        arg!(--"client-identity-fallback-strategy" <STRATEGY> "Optional fallback strategy used \
+                        only when reading bookmarks. If set, openwec will look up bookmarks under the primary \
+                        identity first and fall back to this strategy if no bookmark is found. The fallback \
+                        bookmark is then used for the next push, which stores it under the primary identity. \
+                        Useful when migrating from one identity strategy to another without losing position. \
+                        See the \"Migrating an existing subscription\" section in doc/subscription.md.")
+                        .value_parser(["Subject", "MachineID", "SubjectAndMachineID"])
+                    )
                 )
                 .subcommand(
                     Command::new("edit")
@@ -189,6 +206,24 @@ async fn main() {
                     )
                     .arg(
                         arg!(--"ignore-channel-error" <BOOL> "Configure clients to ignore filtering errors or not.").value_parser(value_parser!(bool))
+                    )
+                    .arg(
+                        arg!(--"client-identity-strategy" <STRATEGY> "How openwec identifies a unique \
+                        machine for bookmarks, heartbeats and per-machine metrics. \
+                        Use 'Subject' (default) when each machine has its own client certificate / Kerberos principal. \
+                        Use 'SubjectAndMachineID' or 'MachineID' when several machines share an identity (e.g. a tenant-wide TLS certificate). \
+                        See the \"Per-machine identity strategy\" section in doc/subscription.md.")
+                        .value_parser(["Subject", "MachineID", "SubjectAndMachineID"])
+                    )
+                    .arg(
+                        arg!(--"client-identity-fallback-strategy" [STRATEGY] "Optional fallback strategy used \
+                        only when reading bookmarks. If set, openwec will look up bookmarks under the primary \
+                        identity first and fall back to this strategy if no bookmark is found. The fallback \
+                        bookmark is then used for the next push, which stores it under the primary identity. \
+                        Useful when migrating from one identity strategy to another without losing position. \
+                        Pass without value to clear it. \
+                        See the \"Migrating an existing subscription\" section in doc/subscription.md.")
+                        .value_parser(["Subject", "MachineID", "SubjectAndMachineID"])
                     )
                 )
                 .subcommand(

@@ -17,6 +17,7 @@ use self::{
     _012_alter_outputs_files_config::AlterOutputsFilesConfig,
     _013_add_max_elements_field_in_subscriptions_table::AddMaxElementsFieldInSubscriptionsTable,
     _014_alter_client_filter_in_subscriptions::AlterClientFilterInSubscriptionsTable,
+    _015_add_client_identity_fields_in_subscriptions::AddClientIdentityFieldsInSubscriptionsTable,
 };
 
 mod _001_create_subscriptions_table;
@@ -33,6 +34,7 @@ mod _011_add_locale_fields_in_subscriptions_table;
 mod _012_alter_outputs_files_config;
 mod _013_add_max_elements_field_in_subscriptions_table;
 mod _014_alter_client_filter_in_subscriptions;
+mod _015_add_client_identity_fields_in_subscriptions;
 
 pub fn register_migrations(sqlite_db: &mut SQLiteDatabase) {
     sqlite_db.register_migration(Arc::new(CreateSubscriptionsTable));
@@ -49,4 +51,5 @@ pub fn register_migrations(sqlite_db: &mut SQLiteDatabase) {
     sqlite_db.register_migration(Arc::new(AlterOutputsFilesConfig));
     sqlite_db.register_migration(Arc::new(AddMaxElementsFieldInSubscriptionsTable));
     sqlite_db.register_migration(Arc::new(AlterClientFilterInSubscriptionsTable));
+    sqlite_db.register_migration(Arc::new(AddClientIdentityFieldsInSubscriptionsTable));
 }

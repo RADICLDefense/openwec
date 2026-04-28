@@ -175,3 +175,11 @@ Default proxy header names are:
 Only the forwarded leaf certificate header is required at runtime. The subject and issuer headers are optional CN consistency checks, while the serial and validity headers are optional exact consistency checks. If the forwarded IP header is present, OpenWEC uses it as the client IP for event metadata and output path mapping; when that header contains multiple comma-separated hops, OpenWEC uses the rightmost non-empty value. Otherwise it falls back to the proxy-to-backend socket address. The `ca_certificate` bundle should contain whatever issuer certificates are needed for OpenWEC to validate the forwarded leaf certificate in your PKI.
 
 See [openwec.conf.sample.toml](../openwec.conf.sample.toml) for the full list of available parameters and header overrides.
+
+## Sharing a TLS certificate across machines
+
+A common deployment pattern is to issue a single client TLS certificate per tenant and provision that certificate on every machine of that tenant. With the default `Subject` identity strategy, every machine in such a tenant collapses to the same client identifier, which means they share a bookmark, share heartbeats and share per-machine metrics.
+
+If that is your situation, configure the affected subscription(s) with `client_identity_strategy = "SubjectAndMachineID"`. OpenWEC will then key bookmarks, heartbeats and metrics on the certificate subject *and* the SOAP `MachineID` advertised by the client, giving you per-machine granularity while still scoping data to the certificate's tenant.
+
+See [Per-machine identity strategy](subscription.md#per-machine-identity-strategy) for the trade-offs and a step-by-step migration recipe.

@@ -12,6 +12,43 @@ use crate::{
     transformers::output_files_use_path::transform_files_config_to_path,
 };
 
+#[derive(
+    Default,
+    Debug,
+    Clone,
+    Copy,
+    Eq,
+    PartialEq,
+    Deserialize,
+    Serialize,
+    Display,
+    AsRefStr,
+    EnumString,
+)]
+#[strum(ascii_case_insensitive)]
+pub enum MachineIdentityStrategy {
+    #[default]
+    Subject,
+    MachineID,
+    SubjectAndMachineID,
+}
+
+impl From<MachineIdentityStrategy> for crate::subscription::MachineIdentityStrategy {
+    fn from(value: MachineIdentityStrategy) -> Self {
+        match value {
+            MachineIdentityStrategy::Subject => {
+                crate::subscription::MachineIdentityStrategy::Subject
+            }
+            MachineIdentityStrategy::MachineID => {
+                crate::subscription::MachineIdentityStrategy::MachineID
+            }
+            MachineIdentityStrategy::SubjectAndMachineID => {
+                crate::subscription::MachineIdentityStrategy::SubjectAndMachineID
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct KafkaConfiguration {
@@ -318,6 +355,8 @@ struct SubscriptionOptions {
     pub ignore_channel_error: Option<bool>,
     pub locale: Option<String>,
     pub data_locale: Option<String>,
+    pub client_identity_strategy: Option<MachineIdentityStrategy>,
+    pub client_identity_fallback_strategy: Option<MachineIdentityStrategy>,
 }
 
 impl SubscriptionOptions {
@@ -364,6 +403,14 @@ impl SubscriptionOptions {
 
         data.set_locale(self.locale.clone());
         data.set_data_locale(self.data_locale.clone());
+
+        if let Some(strategy) = self.client_identity_strategy {
+            data.set_client_identity_strategy(strategy.into());
+        }
+
+        data.set_client_identity_fallback_strategy(
+            self.client_identity_fallback_strategy.map(Into::into),
+        );
     }
 }
 #[derive(Debug, PartialEq, Clone, Eq, Deserialize)]
@@ -451,6 +498,8 @@ max_envelope_size = 14
 read_existing_events = false
 content_format = "Raw" # or RenderedText
 ignore_channel_error = true
+client_identity_strategy = "SubjectAndMachineID"
+client_identity_fallback_strategy = "Subject"
 
 [filter]
 operation = "Only" # or Except
@@ -576,6 +625,12 @@ path = "/whatever/you/{ip}/want/{client}/{ip:2}/{node}/end"
             .set_read_existing_events(false)
             .set_content_format(crate::subscription::ContentFormat::Raw)
             .set_ignore_channel_error(true)
+            .set_client_identity_strategy(
+                crate::subscription::MachineIdentityStrategy::SubjectAndMachineID,
+            )
+            .set_client_identity_fallback_strategy(Some(
+                crate::subscription::MachineIdentityStrategy::Subject,
+            ))
             .set_revision(Some(revision));
 
         let mut kafka_options = HashMap::new();
@@ -1016,5 +1071,76 @@ targets = ["radis*@REALM"]
 
         assert_eq!(data, expected);
         Ok(())
+    }
+
+    const IDENTITY_STRATEGY_DEFAULT_CONF: &str = r#"
+uuid = "28fcc206-1336-4e4a-b76b-18b0ab46e585"
+name = "identity-default"
+query = "<QueryList></QueryList>"
+
+[[outputs]]
+driver = "Files"
+format = "Raw"
+config = { path = "/data/logs/{ip}/{client}/messages" }
+    "#;
+
+    #[test]
+    fn test_identity_strategy_default() -> Result<()> {
+        let data = parse(IDENTITY_STRATEGY_DEFAULT_CONF, None)?;
+        assert_eq!(
+            data.client_identity_strategy(),
+            crate::subscription::MachineIdentityStrategy::Subject
+        );
+        assert_eq!(data.client_identity_fallback_strategy(), None);
+        Ok(())
+    }
+
+    const IDENTITY_STRATEGY_SET_CONF: &str = r#"
+uuid = "28fcc206-1336-4e4a-b76b-18b0ab46e585"
+name = "identity-set"
+query = "<QueryList></QueryList>"
+
+[options]
+client_identity_strategy = "SubjectAndMachineID"
+client_identity_fallback_strategy = "Subject"
+
+[[outputs]]
+driver = "Files"
+format = "Raw"
+config = { path = "/data/logs/{machine}/messages" }
+    "#;
+
+    #[test]
+    fn test_identity_strategy_set() -> Result<()> {
+        let data = parse(IDENTITY_STRATEGY_SET_CONF, None)?;
+        assert_eq!(
+            data.client_identity_strategy(),
+            crate::subscription::MachineIdentityStrategy::SubjectAndMachineID
+        );
+        assert_eq!(
+            data.client_identity_fallback_strategy(),
+            Some(crate::subscription::MachineIdentityStrategy::Subject)
+        );
+        Ok(())
+    }
+
+    const IDENTITY_STRATEGY_INVALID_CONF: &str = r#"
+uuid = "28fcc206-1336-4e4a-b76b-18b0ab46e585"
+name = "identity-invalid"
+query = "<QueryList></QueryList>"
+
+[options]
+client_identity_strategy = "Banana"
+
+[[outputs]]
+driver = "Files"
+format = "Raw"
+config = { path = "/data/logs/{machine}/messages" }
+    "#;
+
+    #[test]
+    #[should_panic(expected = "unknown variant `Banana`")]
+    fn test_identity_strategy_invalid() {
+        parse(IDENTITY_STRATEGY_INVALID_CONF, None).unwrap();
     }
 }

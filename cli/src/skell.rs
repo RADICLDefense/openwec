@@ -104,6 +104,30 @@ fn get_options() -> String {
 # Example: en-US
 # Defaults to unset, meaning OpenWEC lets the client choose.
 # data_locale =
+
+# How openwec identifies a unique machine for bookmarks, heartbeats and
+# per-machine metrics. Possible values:
+# - "Subject" (default): use the authenticated client identity (TLS subject /
+#   Kerberos principal). This is the historical behavior. It is correct when
+#   each machine has its own credential.
+# - "MachineID": use only the SOAP <m:MachineID> header advertised by the
+#   client (lowercased). Use this when many machines share a credential.
+# - "SubjectAndMachineID": composite key built from the authenticated
+#   identity and the lowercased SOAP MachineID. This is the safest choice
+#   when several machines share the same TLS certificate (or Kerberos
+#   principal): it preserves per-tenant separation while still giving each
+#   machine its own bookmarks and heartbeats.
+# client_identity_strategy = "Subject"
+
+# Optional fallback strategy used only when reading bookmarks. If set,
+# openwec will look up bookmarks under `client_identity_strategy` first and
+# fall back to this strategy if no row is found. The fallback bookmark is
+# then re-stored under `client_identity_strategy` on the next event push,
+# so this acts as a one-shot migration aid when switching strategies on an
+# already-populated subscription.
+# Example to migrate from "Subject" to "SubjectAndMachineID" without losing
+# the position of clients that have already started forwarding events:
+# client_identity_fallback_strategy = "Subject"
 "#,
         format_bool(DEFAULT_ENABLED),
         DEFAULT_HEARTBEAT_INTERVAL,

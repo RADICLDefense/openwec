@@ -78,6 +78,7 @@ Type 3 is a limited token with administrative privileges removed and administrat
         let mut metadata = EventMetadata::new(
             &SocketAddr::from_str("192.168.58.100:5985").unwrap(),
             "WIN10$@WINDOMAIN.LOCAL",
+            "WIN10$@WINDOMAIN.LOCAL",
             Some("openwec".to_owned()),
             &subscription,
             "188BB736-9441-5C66-188B-B73694415C66".to_string(),

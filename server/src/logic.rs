@@ -20,7 +20,9 @@ use crate::{
 use common::{
     database::Db,
     settings::{Collector, Monitoring, Server},
-    subscription::{SubscriptionOutputFormat, SubscriptionUuid},
+    subscription::{
+        compute_machine_key, SubscriptionData, SubscriptionOutputFormat, SubscriptionUuid,
+    },
 };
 use hyper::http::status::StatusCode;
 use log::{debug, error, warn};
@@ -53,6 +55,99 @@ impl Response {
     pub fn err(status_code: StatusCode) -> Self {
         Response::Err(status_code)
     }
+}
+
+/// Computes the effective per-machine identity key for a subscription.
+///
+/// The result is what we use as the `machine` column in `bookmarks` and
+/// `heartbeats`, in the `MACHINE` metric label, and as the `{machine}` template
+/// variable / `Machine` JSON field exposed to outputs.
+///
+/// Returns `Err` if the configured strategy requires a `MachineID` SOAP header
+/// but the client did not provide one. The caller is expected to translate
+/// that into an HTTP error so the client retries (rather than us silently
+/// falling back to the subject and merging multiple physical machines into a
+/// single bookmark).
+fn effective_machine_key(
+    subscription_data: &SubscriptionData,
+    client: &str,
+    machine_id: Option<&str>,
+) -> Result<String> {
+    let strategy = subscription_data.client_identity_strategy();
+    compute_machine_key(strategy, client, machine_id).ok_or_else(|| {
+        anyhow!(
+            "Subscription {} ({}) is configured with client_identity_strategy = {} but the request \
+             from {} did not include a MachineID SOAP header",
+            subscription_data.name(),
+            subscription_data.uuid(),
+            strategy,
+            client
+        )
+    })
+}
+
+/// Loads a bookmark for the given subscription, falling back to the
+/// subscription's `client_identity_fallback_strategy` if no bookmark is found
+/// for the primary effective key.
+///
+/// This is the "fallback-on-read" mechanism: when an operator switches a
+/// subscription to a finer-grained identity strategy (e.g. from `Subject` to
+/// `SubjectAndMachineID`), we still want clients to resume from where they
+/// left off rather than re-emitting historical events. If we find a bookmark
+/// under the fallback key we return it; the next `Events` message will then
+/// store it under the new effective key, completing the migration for that
+/// machine.
+async fn load_bookmark_with_fallback(
+    db: &Db,
+    subscription_data: &SubscriptionData,
+    client: &str,
+    machine_id: Option<&str>,
+    primary_key: &str,
+) -> Result<Option<String>> {
+    let subscription_uuid = subscription_data.uuid_string();
+    let bookmark = db
+        .get_bookmark(primary_key, &subscription_uuid)
+        .await
+        .context("Failed to retrieve current bookmark from database")?;
+
+    if bookmark.is_some() {
+        return Ok(bookmark);
+    }
+
+    let Some(fallback_strategy) = subscription_data.client_identity_fallback_strategy() else {
+        return Ok(None);
+    };
+
+    if fallback_strategy == subscription_data.client_identity_strategy() {
+        return Ok(None);
+    }
+
+    let Some(fallback_key) = compute_machine_key(fallback_strategy, client, machine_id) else {
+        return Ok(None);
+    };
+
+    if fallback_key == primary_key {
+        return Ok(None);
+    }
+
+    let fallback_bookmark = db
+        .get_bookmark(&fallback_key, &subscription_uuid)
+        .await
+        .context("Failed to retrieve fallback bookmark from database")?;
+
+    if fallback_bookmark.is_some() {
+        debug!(
+            "Loaded bookmark for subscription {} ({}) via fallback strategy {} (key {}); \
+             will be re-stored under primary key {} on next Events message",
+            subscription_data.name(),
+            subscription_data.uuid(),
+            fallback_strategy,
+            fallback_key,
+            primary_key,
+        );
+    }
+
+    Ok(fallback_bookmark)
 }
 
 fn create_subscription_body(
@@ -248,10 +343,23 @@ async fn handle_enumerate(
             options,
         );
 
-        let mut bookmark: Option<String> = db
-            .get_bookmark(request_data.client(), &subscription_data.uuid_string())
-            .await
-            .context("Failed to retrieve current bookmark from database")?;
+        let machine_key =
+            match effective_machine_key(subscription_data, request_data.client(), machine_id) {
+                Ok(key) => key,
+                Err(err) => {
+                    warn!("{:#}", err);
+                    return Ok(Response::err(StatusCode::BAD_REQUEST));
+                }
+            };
+
+        let mut bookmark: Option<String> = load_bookmark_with_fallback(
+            db,
+            subscription_data,
+            request_data.client(),
+            machine_id,
+            &machine_key,
+        )
+        .await?;
 
         if bookmark.is_none() && subscription_data.read_existing_events() {
             bookmark =
@@ -259,8 +367,9 @@ async fn handle_enumerate(
         }
 
         debug!(
-            "Load bookmark of {} for subscription {}: {:?}",
+            "Load bookmark of {} (machine key {}) for subscription {}: {:?}",
             request_data.client(),
+            machine_key,
             subscription_data.uuid(),
             bookmark
         );
@@ -335,18 +444,28 @@ async fn handle_heartbeat(
         return Ok(Response::err(StatusCode::FORBIDDEN));
     }
 
+    let machine_key =
+        match effective_machine_key(subscription.data(), request_data.client(), machine_id) {
+            Ok(key) => key,
+            Err(err) => {
+                warn!("{:#}", err);
+                return Ok(Response::err(StatusCode::BAD_REQUEST));
+            }
+        };
+
     debug!(
-        "Received Heartbeat from {}:{} ({:?}) for subscription {} ({})",
+        "Received Heartbeat from {}:{} ({:?}, machine key {}) for subscription {} ({})",
         request_data.remote_addr().ip(),
         request_data.remote_addr().port(),
         request_data.client(),
+        machine_key,
         subscription.data().name(),
         subscription.uuid_string(),
     );
 
     store_heartbeat(
         heartbeat_tx,
-        request_data.client(),
+        &machine_key,
         request_data.remote_addr().ip().to_string(),
         &subscription.uuid_string(),
         false,
@@ -470,6 +589,15 @@ async fn handle_events(
             return Ok(Response::err(StatusCode::FORBIDDEN));
         }
 
+        let machine_key =
+            match effective_machine_key(subscription.data(), request_data.client(), machine_id) {
+                Ok(key) => key,
+                Err(err) => {
+                    warn!("{:#}", err);
+                    return Ok(Response::err(StatusCode::BAD_REQUEST));
+                }
+            };
+
         // Retrieve the public version sent by the client, not the one stored in memory
         let public_version = if let Some(public_version) = message.header().version() {
             public_version
@@ -479,11 +607,12 @@ async fn handle_events(
         };
 
         debug!(
-            "Received {} events from {}:{} ({}) for subscription {} ({})",
+            "Received {} events from {}:{} ({}, machine key {}) for subscription {} ({})",
             events.len(),
             request_data.remote_addr().ip(),
             request_data.remote_addr().port(),
             request_data.client(),
+            machine_key,
             subscription.data().name(),
             subscription.uuid_string()
         );
@@ -495,7 +624,7 @@ async fn handle_events(
                 counter!(INPUT_EVENTS_COUNTER,
                     SUBSCRIPTION_NAME => subscription.data().name().to_owned(),
                     SUBSCRIPTION_UUID => subscription.uuid_string(),
-                    MACHINE => request_data.client().to_string())
+                    MACHINE => machine_key.clone())
             }
             _ => {
                 counter!(INPUT_EVENTS_COUNTER,
@@ -510,7 +639,7 @@ async fn handle_events(
                 counter!(INPUT_EVENT_BYTES_COUNTER,
                     SUBSCRIPTION_NAME => subscription.data().name().to_owned(),
                     SUBSCRIPTION_UUID => subscription.uuid_string(),
-                    MACHINE => request_data.client().to_string())
+                    MACHINE => machine_key.clone())
             }
             _ => {
                 counter!(INPUT_EVENT_BYTES_COUNTER,
@@ -528,6 +657,7 @@ async fn handle_events(
         let metadata = Arc::new(EventMetadata::new(
             request_data.remote_addr(),
             request_data.client(),
+            &machine_key,
             server.node_name().cloned(),
             &subscription,
             public_version.clone(),
@@ -631,23 +761,24 @@ async fn handle_events(
             .header()
             .bookmarks()
             .ok_or_else(|| anyhow!("Missing bookmarks in request payload"))?;
-        // Store bookmarks and heartbeats
-        db.store_bookmark(request_data.client(), &subscription.uuid_string(), bookmark)
+        // Store bookmarks and heartbeats keyed by the effective machine identity.
+        db.store_bookmark(&machine_key, &subscription.uuid_string(), bookmark)
             .await
             .context("Failed to store bookmarks")?;
 
         debug!(
-            "Store bookmark from {}:{} ({}) for subscription {} ({}): {}",
+            "Store bookmark from {}:{} ({}, machine key {}) for subscription {} ({}): {}",
             request_data.remote_addr().ip(),
             request_data.remote_addr().port(),
             request_data.client(),
+            machine_key,
             subscription.data().name(),
             subscription.uuid_string(),
             bookmark
         );
         store_heartbeat(
             heartbeat_tx,
-            request_data.client(),
+            &machine_key,
             request_data.remote_addr().ip().to_string(),
             &subscription.uuid_string(),
             true,
